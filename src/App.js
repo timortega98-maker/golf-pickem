@@ -25,9 +25,6 @@ const BONUS_PER     = 6;
 const TOTAL_MEMBERS = 18;
 const BONUS_TOTAL   = BONUS_PER * (TOTAL_MEMBERS - 1);
 const PICK_WINDOW_HOURS = 1.5;
-const MAX_ODDS_ENTRIES  = 75;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 const fmtScore  = v => { if (v===null||v===undefined) return "—"; if (v===0) return "E"; return v>0?`+${v}`:`${v}`; };
 const fmtMoney  = v => { if (v===0) return "$0"; return v>0?`+$${v}`:`-$${Math.abs(v)}`; };
 const scoreColor= v => { if (v===null||v===undefined) return C.gray400; if (v<0) return C.green; if (v>0) return C.red; return C.gray600; };
@@ -38,14 +35,6 @@ const rankStyle = r => {
   if (r===3) return { bg:C.goldBg,  text:"#a07830", bd:"#c9a227" };
   if (r>=14) return { bg:C.redBg,   text:C.red,     bd:C.red     };
   return            { bg:C.gray100, text:C.gray600, bd:C.gray200 };
-};
-
-// Convert American moneyline string to a numeric sort key (lower = bigger favorite)
-const oddsToSort = str => {
-  if (!str) return 99999;
-  const n = parseInt(str.replace("+",""));
-  if (isNaN(n)) return 99999;
-  return n > 0 ? n : Math.round(10000 / Math.abs(n));
 };
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
@@ -302,14 +291,13 @@ const PayoutsTab = () => (
   </div>
 );
 
-// ── Odds Manager (sub-component used inside Admin) ────────────────────────────
-const OddsManager = ({ tournamentId, onOddsUpdated }) => {
-  const emptyRows = () => Array.from({length: MAX_ODDS_ENTRIES}, () => ({ name:"", odds:"" }));
-  const [rows,      setRows]      = useState(emptyRows());
+// ── Field Manager (paste-based, replaces odds manager) ───────────────────────
+const FieldManager = ({ tournamentId, onFieldUpdated }) => {
+  const [pasteText, setPasteText] = useState("");
+  const [preview,   setPreview]   = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [saving,    setSaving]    = useState(false);
   const [savedMsg,  setSavedMsg]  = useState(false);
-  const [error,     setError]     = useState("");
 
   useEffect(() => {
     if (!tournamentId) return;
@@ -317,134 +305,134 @@ const OddsManager = ({ tournamentId, onOddsUpdated }) => {
       setLoading(true);
       const { data } = await supabase
         .from("odds")
-        .select("golfer_name, display_odds")
+        .select("golfer_name")
         .eq("tournament_id", tournamentId)
         .order("avg_odds");
       if (data && data.length > 0) {
-        const filled = data.map(d => ({ name: d.golfer_name, odds: d.display_odds }));
-        const padded = [...filled, ...Array.from({length: Math.max(0, MAX_ODDS_ENTRIES - filled.length)}, () => ({name:"",odds:""}))];
-        setRows(padded.slice(0, MAX_ODDS_ENTRIES));
+        const names = data.map(d => d.golfer_name);
+        setPasteText(names.join("\n"));
+        setPreview(names);
       } else {
-        setRows(emptyRows());
+        setPasteText("");
+        setPreview([]);
       }
       setLoading(false);
     };
     load();
   }, [tournamentId]);
 
-  const updateRow = (i, field, val) => {
-    setRows(prev => {
-      const next = [...prev];
-      next[i] = {...next[i], [field]: val};
-      return next;
-    });
+  const parsePaste = (text) => {
+    return text
+      .split("\n")
+      .map(line =>
+        line
+          .trim()
+          // Strip leading numbers like "1." "1)" "1 " etc
+          .replace(/^\d+[.)]\s*/, "")
+          .replace(/^\d+\s+/, "")
+          .trim()
+      )
+      .filter(Boolean);
   };
 
-  const validateOdds = (str) => {
-    if (!str) return true;
-    return /^[+-]?\d+$/.test(str.trim());
+  const handleTextChange = (val) => {
+    setPasteText(val);
+    setPreview(parsePaste(val));
   };
 
-  const saveOdds = async () => {
-    const filled = rows.filter(r => r.name.trim());
-    const invalid = filled.filter(r => !validateOdds(r.odds));
-    if (invalid.length > 0) {
-      setError(`Invalid odds format for: ${invalid.map(r=>r.name).join(", ")}. Use American format like +350 or +1200.`);
-      return;
-    }
-    setError("");
+  const saveField = async () => {
+    const names = parsePaste(pasteText);
+    if (names.length === 0) return;
     setSaving(true);
 
-    // Delete existing odds for this tournament then re-insert
     await supabase.from("odds").delete().eq("tournament_id", tournamentId);
 
-    if (filled.length > 0) {
-      const upserts = filled.map(r => ({
-        tournament_id: tournamentId,
-        golfer_name:   r.name.trim(),
-        avg_odds:      oddsToSort(r.odds.trim()),
-        display_odds:  r.odds.trim().startsWith("+") || r.odds.trim().startsWith("-")
-                         ? r.odds.trim()
-                         : `+${r.odds.trim()}`,
-        updated_at:    new Date().toISOString(),
-      }));
-      await supabase.from("odds").insert(upserts);
-    }
+    const upserts = names.map((name, i) => ({
+      tournament_id: tournamentId,
+      golfer_name:   name,
+      avg_odds:      i + 1,
+      display_odds:  "",
+      updated_at:    new Date().toISOString(),
+    }));
+
+    await supabase.from("odds").insert(upserts);
 
     setSaving(false);
     setSavedMsg(true);
     setTimeout(() => setSavedMsg(false), 3000);
-    if (onOddsUpdated) onOddsUpdated();
+    setPreview(names);
+    if (onFieldUpdated) onFieldUpdated();
   };
 
-  const clearAll = () => setRows(emptyRows());
-
-  if (loading) return <div style={{fontSize:13,color:C.gray400,padding:"12px 0"}}>Loading odds...</div>;
-
-  const filled = rows.filter(r => r.name.trim()).length;
+  if (loading) return <div style={{fontSize:13,color:C.gray400,padding:"12px 0"}}>Loading field...</div>;
 
   return (
     <div>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10,flexWrap:"wrap",gap:8}}>
-        <div style={{fontSize:13,color:C.gray600}}>
-          Enter up to {MAX_ODDS_ENTRIES} golfers from DraftKings, best odds first.
-          <span style={{marginLeft:8,color:C.gray400}}>{filled}/{MAX_ODDS_ENTRIES} entered</span>
+      <div style={{fontSize:13,color:C.gray600,marginBottom:10}}>
+        Paste the tournament field below — one name per line. The order you paste is the order members will see in their dropdown.
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        <div>
+          <div style={{fontSize:12,fontWeight:700,color:C.gray400,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>
+            Paste field here
+          </div>
+          <textarea
+            value={pasteText}
+            onChange={e => handleTextChange(e.target.value)}
+            placeholder={"Scottie Scheffler\nRory McIlroy\nXander Schauffele\n..."}
+            style={{
+              width:"100%", height:320, fontSize:13, padding:"10px",
+              border:`1px solid ${C.gray200}`, borderRadius:8,
+              background:C.white, color:C.gray800,
+              resize:"vertical", fontFamily:"sans-serif", lineHeight:1.6,
+            }}
+          />
         </div>
-        <div style={{display:"flex",gap:8}}>
-          <button onClick={clearAll}
-            style={{fontSize:12,padding:"5px 12px",borderRadius:6,border:`1px solid ${C.gray200}`,background:C.white,color:C.gray600,cursor:"pointer"}}>
-            Clear all
-          </button>
-          <button onClick={saveOdds} disabled={saving}
-            style={{fontSize:13,padding:"6px 16px",borderRadius:6,border:`1px solid ${C.green}`,background:C.green,color:C.white,cursor:"pointer",fontWeight:700,opacity:saving?0.6:1}}>
-            {saving ? "Saving..." : "Save odds"}
-          </button>
-          {savedMsg && <span style={{fontSize:12,color:C.green,fontWeight:700,alignSelf:"center"}}>Saved ✓</span>}
+
+        <div>
+          <div style={{fontSize:12,fontWeight:700,color:C.gray400,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>
+            Preview — {preview.length} golfers
+          </div>
+          <div style={{
+            height:320, overflowY:"auto",
+            border:`1px solid ${C.gray200}`, borderRadius:8,
+            background:C.gray50,
+          }}>
+            {preview.length === 0 ? (
+              <div style={{padding:"20px 14px",fontSize:13,color:C.gray400}}>Names will appear here as you paste...</div>
+            ) : (
+              preview.map((name, i) => (
+                <div key={i} style={{
+                  display:"flex", alignItems:"center", gap:10,
+                  padding:"5px 12px",
+                  borderBottom:i<preview.length-1?`1px solid ${C.gray100}`:"none",
+                  background:C.white,
+                }}>
+                  <span style={{fontSize:11,color:C.gray400,fontWeight:600,minWidth:22}}>{i+1}</span>
+                  <span style={{fontSize:13,color:C.gray800}}>{name}</span>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       </div>
 
-      {error && (
-        <div style={{fontSize:12,color:C.red,background:C.redBg,border:`1px solid ${C.red}`,borderRadius:7,padding:"7px 12px",marginBottom:10}}>
-          {error}
-        </div>
-      )}
-
-      <div style={{border:`1px solid ${C.gray200}`,borderRadius:10,overflow:"hidden"}}>
-        <div style={{display:"grid",gridTemplateColumns:"36px 1fr 120px",background:C.gray50,borderBottom:`1px solid ${C.gray200}`,padding:"6px 10px",gap:8}}>
-          <span style={{fontSize:11,fontWeight:700,color:C.gray400,textTransform:"uppercase",letterSpacing:"0.05em"}}>#</span>
-          <span style={{fontSize:11,fontWeight:700,color:C.gray400,textTransform:"uppercase",letterSpacing:"0.05em"}}>Golfer name</span>
-          <span style={{fontSize:11,fontWeight:700,color:C.gray400,textTransform:"uppercase",letterSpacing:"0.05em"}}>Odds (DK)</span>
-        </div>
-        <div style={{maxHeight:400,overflowY:"auto"}}>
-          {rows.map((row, i) => (
-            <div key={i} style={{
-              display:"grid", gridTemplateColumns:"36px 1fr 120px",
-              gap:8, padding:"5px 10px", alignItems:"center",
-              borderBottom:i<rows.length-1?`1px solid ${C.gray100}`:"none",
-              background: row.name.trim() ? C.white : C.gray50,
-            }}>
-              <span style={{fontSize:12,color:C.gray400,fontWeight:600}}>{i+1}</span>
-              <input
-                type="text"
-                placeholder="Golfer name"
-                value={row.name}
-                onChange={e => updateRow(i, "name", e.target.value)}
-                style={{fontSize:13,padding:"4px 8px",border:`1px solid ${C.gray200}`,borderRadius:6,background:C.white,color:C.gray800,width:"100%"}}
-              />
-              <input
-                type="text"
-                placeholder="+350"
-                value={row.odds}
-                onChange={e => updateRow(i, "odds", e.target.value)}
-                style={{fontSize:13,padding:"4px 8px",border:`1px solid ${C.gray200}`,borderRadius:6,background:C.white,color:C.gray800,width:"100%",fontFamily:"monospace"}}
-              />
-            </div>
-          ))}
-        </div>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginTop:12}}>
+        <button onClick={saveField} disabled={saving||preview.length===0}
+          style={{fontSize:13,padding:"7px 20px",borderRadius:7,border:`1px solid ${C.green}`,background:C.green,color:C.white,cursor:"pointer",fontWeight:700,opacity:(saving||preview.length===0)?0.6:1}}>
+          {saving ? "Saving..." : `Save field (${preview.length} golfers)`}
+        </button>
+        <button onClick={()=>{setPasteText("");setPreview([]);}}
+          style={{fontSize:12,padding:"7px 14px",borderRadius:7,border:`1px solid ${C.gray200}`,background:C.white,color:C.gray600,cursor:"pointer"}}>
+          Clear
+        </button>
+        {savedMsg && <span style={{fontSize:12,color:C.green,fontWeight:700}}>Field saved ✓</span>}
       </div>
 
       <div style={{fontSize:11,color:C.gray400,marginTop:8}}>
-        Odds are per-tournament — they don't carry over. To add golfers outside the top {MAX_ODDS_ENTRIES}, insert them directly in Supabase: <code style={{background:C.gray100,padding:"1px 5px",borderRadius:4,fontSize:11}}>insert into odds (tournament_id, golfer_name, display_odds, avg_odds) values ('...', 'Name', '+5000', 5000);</code>
+        Field is per-tournament and doesn't carry over. To add a golfer not in the list, go to Supabase and run:<br/>
+        <code style={{background:C.gray100,padding:"1px 5px",borderRadius:4,fontSize:11}}>insert into odds (tournament_id, golfer_name, avg_odds, display_odds) values ('tournament-id', 'Player Name', 999, '');</code>
       </div>
     </div>
   );
@@ -459,7 +447,7 @@ const AdminTab = ({ members, tournaments, picks, setPicks }) => {
   const [eventType,   setEventType]   = useState("major");
   const [saving,      setSaving]      = useState(false);
   const [oddsData,    setOddsData]    = useState([]);
-  const [activeSection, setActiveSection] = useState("picks"); // "picks" | "odds"
+  const [activeSection, setActiveSection] = useState("picks"); // "picks" | "field"
 
   useEffect(() => {
     if (!selTourney && tournaments.length > 0) {
@@ -594,7 +582,7 @@ const AdminTab = ({ members, tournaments, picks, setPicks }) => {
       {/* Sub-nav: Picks / Odds */}
       {!isHistorical && (
         <div style={{display:"flex",gap:2,marginBottom:16,borderBottom:`1px solid ${C.gray200}`}}>
-          {["picks","odds"].map(s => {
+          {["picks","field"].map(s => {
             const on = activeSection === s;
             return (
               <button key={s} onClick={() => setActiveSection(s)} style={{
@@ -603,15 +591,15 @@ const AdminTab = ({ members, tournaments, picks, setPicks }) => {
                 color:on?C.green:C.gray600,
                 borderBottom:on?`2.5px solid ${C.green}`:"2.5px solid transparent",
                 marginBottom:-1,borderRadius:0,textTransform:"capitalize",
-              }}>{s === "picks" ? "Member picks" : "Odds manager"}</button>
+              }}>{s === "picks" ? "Member picks" : "Field manager"}</button>
             );
           })}
         </div>
       )}
 
       {/* Odds manager section */}
-      {!isHistorical && activeSection === "odds" && (
-        <OddsManager tournamentId={selTourney} onOddsUpdated={handleOddsUpdated} />
+      {!isHistorical && activeSection === "field" && (
+        <FieldManager tournamentId={selTourney} onFieldUpdated={handleOddsUpdated} />
       )}
 
       {/* Member picks section */}
@@ -620,7 +608,7 @@ const AdminTab = ({ members, tournaments, picks, setPicks }) => {
           {!isHistorical && <SectionHeader>Member picks — {tourney.name}</SectionHeader>}
           {isHistorical && <NB type="neutral">Completed event — picks are read-only.</NB>}
           {!isHistorical && oddsData.length === 0 && (
-            <NB type="warning">No odds entered yet for this tournament. Go to <strong>Odds manager</strong> to add them before picks open.</NB>
+            <NB type="warning">No field entered yet for this tournament. Go to <strong>Field manager</strong> to add golfers before picks open.</NB>
           )}
           {!isHistorical && (
             <NB type="info">Pick order: worst-to-best season standing. Windows open every 1.5 hours from Tuesday 7pm PST.</NB>
@@ -679,7 +667,7 @@ const AdminTab = ({ members, tournaments, picks, setPicks }) => {
                             return (
                               <option key={g.golfer_name} value={g.golfer_name} disabled={taken}
                                 style={{color:taken?C.gray400:C.gray800}}>
-                                {g.golfer_name} ({g.display_odds}){taken?" — taken":""}
+                                {g.golfer_name}{taken?" — taken":""}
                               </option>
                             );
                           })}
